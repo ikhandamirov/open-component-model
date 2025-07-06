@@ -36,11 +36,9 @@ func GetV1DirBlob(dir v1.Dir) (blob.ReadOnlyBlob, error) {
 	}
 
 	// TODO:
-	// - Produce a blob from the directory path
-	// - Handle the MimeType and Compress options
-	// - Handle the PreserveDir, FollowSymlinks, ExcludeFiles and IncludeFiles options
+	// - Handle FollowSymlinks, ExcludeFiles and IncludeFiles options.
 
-	reader, err := packDirToTar(dir.Path)
+	reader, err := packDirToTar(dir.Path, &dir)
 	if err != nil {
 		return nil, fmt.Errorf("error producing tar archive: %w", err)
 	}
@@ -54,9 +52,15 @@ func GetV1DirBlob(dir v1.Dir) (blob.ReadOnlyBlob, error) {
 	return dirBlob, nil
 }
 
-func packDirToTar(path string) (_ io.Reader, err error) {
+func packDirToTar(path string, dir *v1.Dir) (_ io.Reader, err error) {
+	// Determine the base directory for relative paths in the tar archive.
+	baseDir := path
+	if dir.PreserveDir {
+		baseDir = filepath.Dir(path)
+	}
+
 	// Create a new virtual FileSystem instance based on the provided directory path.
-	fs, err := filesystem.NewFS(path, os.O_RDONLY)
+	fs, err := filesystem.NewFS(baseDir, os.O_RDONLY)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create filesystem while trying to access %v: %w", path, err)
 	}
@@ -72,7 +76,7 @@ func packDirToTar(path string) (_ io.Reader, err error) {
 	}()
 
 	// Walk recursively through directory contents and add it to the tar.
-	err = walkDirContents(path, path, fs, tw)
+	err = walkDirContents(path, baseDir, fs, tw)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add directory contents to tar: %w", err)
 	}
@@ -91,11 +95,6 @@ func walkDirContents(currentDir string, baseDir string, fs filesystem.FileSystem
 	dirEntries, err := fs.ReadDir(dirRelPath)
 	if err != nil {
 		return err
-	}
-
-	// If the root directory is empty, there is nothing to archive.
-	if currentDir == baseDir && len(dirEntries) == 0 {
-		return fmt.Errorf("directory %q is empty", baseDir)
 	}
 
 	// Iterate over directory entries.
@@ -127,7 +126,7 @@ func walkDirContents(currentDir string, baseDir string, fs filesystem.FileSystem
 
 		// If the entry is a file, copy its content to the tar archive.
 		if entry.Type().IsRegular() {
-			file, err := fs.OpenFile(entry.Name(), os.O_RDONLY, 0644)
+			file, err := fs.OpenFile(relPath, os.O_RDONLY, 0644)
 			if err != nil {
 				return err
 			}

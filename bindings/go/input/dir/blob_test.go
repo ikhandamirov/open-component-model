@@ -20,6 +20,10 @@ import (
 )
 
 func TestGetV1DirBlob_Success(t *testing.T) {
+	type TestFile struct {
+		relPath string
+		content string
+	}
 	tests := []struct {
 		name           string
 		mediaType      string
@@ -28,15 +32,25 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 		followSymlinks bool
 		excludeFiles   []string
 		includeFiles   []string
+		expectGzip     bool
+		testDirBase    string
+		testFiles      []TestFile
 	}{
 		{
-			name:           "default dir spec",
+			name:           "default dir spec with nested folders",
 			mediaType:      "application/vnd.gardener.landscaper.blueprint.v1+tar",
 			compress:       false,
 			preserveDir:    false,
 			followSymlinks: false,
 			excludeFiles:   []string{},
 			includeFiles:   []string{},
+			expectGzip:     false,
+			testDirBase:    "input-dir",
+			testFiles: []TestFile{
+				{relPath: "blueprint.yaml", content: "blueprint"},
+				{relPath: "sub/deploy-execution.yaml", content: "deploy-execution"},
+				{relPath: "sub/sub2/export-execution.yaml", content: "export-execution"},
+			},
 		},
 		{
 			name:           "compressed dir",
@@ -46,38 +60,40 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 			followSymlinks: false,
 			excludeFiles:   []string{},
 			includeFiles:   []string{},
+			expectGzip:     true,
+			testDirBase:    "input-dir",
+			testFiles: []TestFile{
+				{relPath: "blueprint.yaml", content: "blueprint"},
+			},
 		},
 		{
-			name:           "preserveDir set to true",
+			name:           "root folder included",
 			mediaType:      "application/vnd.gardener.landscaper.blueprint.v1+tar",
 			compress:       false,
 			preserveDir:    true,
 			followSymlinks: false,
 			excludeFiles:   []string{},
 			includeFiles:   []string{},
+			expectGzip:     false,
+			testDirBase:    "input-dir",
+			testFiles: []TestFile{
+				{relPath: "sub/sub2/export-execution.yaml", content: "export-execution"},
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create directory to test with.
+			// Create directory structure to test with.
 			tempDir := t.TempDir()
-			dirBase := "input-dir"
-			dirAbs := filepath.Join(tempDir, dirBase)
-			err := os.Mkdir(dirAbs, 0755)
-			require.NoError(t, err)
-			fileName1 := filepath.Join(dirAbs, "blueprint.yaml")
-			fileData1 := "blueprint"
-			fileName2 := filepath.Join(dirAbs, "deploy-execution.yaml")
-			fileData2 := "deploy-execution"
-			fileName3 := filepath.Join(dirAbs, "export-execution.yaml")
-			fileData3 := "export-execution"
-			err = os.WriteFile(fileName1, []byte(fileData1), 0644)
-			require.NoError(t, err)
-			err = os.WriteFile(fileName2, []byte(fileData2), 0644)
-			require.NoError(t, err)
-			err = os.WriteFile(fileName3, []byte(fileData3), 0644)
-			require.NoError(t, err)
+			dirAbs := filepath.Join(tempDir, tt.testDirBase)
+			for _, tf := range tt.testFiles {
+				filePath := filepath.Join(dirAbs, tf.relPath)
+				err := os.MkdirAll(filepath.Dir(filePath), 0755)
+				require.NoError(t, err)
+				err = os.WriteFile(filePath, []byte(tf.content), 0644)
+				require.NoError(t, err)
+			}
 
 			// Create v1.File spec.
 			dirSpec := v1.Dir{
@@ -108,7 +124,7 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 				assert.NotEmpty(t, digest)
 			}
 
-			// Test reading data
+			// Test reading data.
 			reader, err := b.ReadCloser()
 			require.NoError(t, err)
 			defer reader.Close()
@@ -116,8 +132,8 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 			data, err := io.ReadAll(reader)
 			require.NoError(t, err)
 
-			if tt.compress {
-				// Decompress gzipped data
+			if tt.expectGzip {
+				// Decompress gzipped data.
 				gzReader, err := gzip.NewReader(bytes.NewReader(data))
 				require.NoError(t, err)
 				defer gzReader.Close()
@@ -125,14 +141,14 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 				data, err = io.ReadAll(gzReader)
 				require.NoError(t, err)
 
-				// Test media type for compressed blob
+				// Test media type for compressed blob.
 				if mediaTypeAware, ok := b.(blob.MediaTypeAware); ok {
 					mediaType, known := mediaTypeAware.MediaType()
 					assert.True(t, known)
 					assert.Equal(t, tt.mediaType+"+gzip", mediaType)
 				}
 			} else {
-				// Test media type for uncompressed blob
+				// Test media type for uncompressed blob.
 				if mediaTypeAware, ok := b.(blob.MediaTypeAware); ok {
 					mediaType, known := mediaTypeAware.MediaType()
 					assert.True(t, known)
@@ -140,30 +156,17 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 				}
 			}
 
-			// Extract files from tar archive
-			fileToExtract := filepath.Base(fileName1)
-			if tt.preserveDir {
-				fileToExtract = filepath.Join(dirBase, fileToExtract)
-			}
-			untarredData1, err := extractFileFromTar(data, fileToExtract)
-			require.NoError(t, err)
-			assert.Equal(t, fileData1, string(untarredData1))
+			// Extract files from tar archive and compare content with original files.
+			for _, tf := range tt.testFiles {
+				fileName := tf.relPath
+				if tt.preserveDir {
+					fileName = filepath.Join(tt.testDirBase, fileName)
+				}
 
-			fileToExtract = filepath.Base(fileName2)
-			if tt.preserveDir {
-				fileToExtract = filepath.Join(dirBase, fileToExtract)
+				untarredData, err := extractFileFromTar(data, fileName)
+				require.NoError(t, err)
+				assert.Equal(t, tf.content, string(untarredData))
 			}
-			untarredData2, err := extractFileFromTar(data, fileToExtract)
-			require.NoError(t, err)
-			assert.Equal(t, fileData2, string(untarredData2))
-
-			fileToExtract = filepath.Base(fileName3)
-			if tt.preserveDir {
-				fileToExtract = filepath.Join(dirBase, fileToExtract)
-			}
-			untarredData3, err := extractFileFromTar(data, fileToExtract)
-			require.NoError(t, err)
-			assert.Equal(t, fileData3, string(untarredData3))
 		})
 	}
 }
@@ -171,7 +174,7 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 func TestGetV1DirBlob_EmptyPath(t *testing.T) {
 	// Create v1.Dir spec with empty path.
 	dirSpec := v1.Dir{
-		Type: runtime.NewUnversionedType("file"),
+		Type: runtime.NewUnversionedType("dir"),
 		Path: "",
 	}
 
@@ -181,16 +184,32 @@ func TestGetV1DirBlob_EmptyPath(t *testing.T) {
 	assert.Nil(t, dirBlob)
 }
 
-func TestGetV1DirBlob_EmptyDir(t *testing.T) {
-	// Create v1.Dir spec pointing to folder with no files.
-	tempDir := t.TempDir()
+func TestGetV1DirBlob_NonExistentPath(t *testing.T) {
+	// Create v1.Dir spec with non-existing path.
 	dirSpec := v1.Dir{
-		Type: runtime.NewUnversionedType("file"),
-		Path: tempDir,
+		Type: runtime.NewUnversionedType("dir"),
+		Path: "/non/existent/path",
 	}
 
-	// Get blob should fail
+	// Get blob should fail. The error:
+	// "failed to create filesystem while trying to access <path>: path does not exist: <path>".
 	dirBlob, err := dir.GetV1DirBlob(dirSpec)
+	assert.Error(t, err)
+	assert.Nil(t, dirBlob)
+
+	// Another case: the input directory does not exist, but its parent folder does.
+	// In this case, and if PreserveDir is true, the FileSystem is created for the existing parent folder.
+	// Still, as there is nothing to tar, we expect an error.
+	tempDir := t.TempDir()
+	dirSpec = v1.Dir{
+		Type:        runtime.NewUnversionedType("dir"),
+		Path:        filepath.Join(tempDir, "non-existent-path"),
+		PreserveDir: true,
+	}
+
+	// Get blob should fail. The error:
+	// "failed to add directory contents to tar: open <path>: no such file or directory".
+	dirBlob, err = dir.GetV1DirBlob(dirSpec)
 	assert.Error(t, err)
 	assert.Nil(t, dirBlob)
 }
