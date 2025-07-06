@@ -12,10 +12,10 @@ import (
 type Dir struct {
 	Type runtime.Type `json:"type"`
 
-	// Path is the path to the file.
+	// Path is the path to the directory.
 	Path string `json:"path"`
 
-	// MediaType is the media type of the file.
+	// MediaType is the media type of the input (resulting blob).
 	MediaType string `json:"mediaType,omitempty"`
 
 	// Compress indicates whether the resulting blob should be compressed with gzip.
