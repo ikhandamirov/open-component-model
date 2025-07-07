@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"ocm.software/open-component-model/bindings/go/blob"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"ocm.software/open-component-model/bindings/go/blob"
 	"ocm.software/open-component-model/bindings/go/input/dir"
 	v1 "ocm.software/open-component-model/bindings/go/input/dir/spec/v1"
 	"ocm.software/open-component-model/bindings/go/runtime"
@@ -89,9 +89,9 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 			dirAbs := filepath.Join(tempDir, tt.testDirBase)
 			for _, tf := range tt.testFiles {
 				filePath := filepath.Join(dirAbs, tf.relPath)
-				err := os.MkdirAll(filepath.Dir(filePath), 0755)
+				err := os.MkdirAll(filepath.Dir(filePath), 0o755)
 				require.NoError(t, err)
-				err = os.WriteFile(filePath, []byte(tf.content), 0644)
+				err = os.WriteFile(filePath, []byte(tf.content), 0o644)
 				require.NoError(t, err)
 			}
 

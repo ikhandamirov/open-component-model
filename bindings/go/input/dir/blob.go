@@ -92,6 +92,9 @@ func packDirToTar(path string, dir *v1.Dir) (_ io.Reader, err error) {
 func walkDirContents(currentDir string, baseDir string, fs filesystem.FileSystem, tw *tar.Writer) (err error) {
 	// Read directory contents.
 	dirRelPath, err := filepath.Rel(baseDir, currentDir)
+	if err != nil {
+		return err
+	}
 	dirEntries, err := fs.ReadDir(dirRelPath)
 	if err != nil {
 		return err
@@ -126,7 +129,7 @@ func walkDirContents(currentDir string, baseDir string, fs filesystem.FileSystem
 
 		// If the entry is a file, copy its content to the tar archive.
 		if entry.Type().IsRegular() {
-			file, err := fs.OpenFile(relPath, os.O_RDONLY, 0644)
+			file, err := fs.OpenFile(relPath, os.O_RDONLY, 0o644)
 			if err != nil {
 				return err
 			}
