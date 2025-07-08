@@ -15,36 +15,34 @@ import (
 	v1 "ocm.software/open-component-model/bindings/go/input/dir/spec/v1"
 )
 
-type InputDirBlob struct {
-	*filesystem.Blob
-	DirMediaType string
-}
-
-func (i InputDirBlob) MediaType() (mediaType string, known bool) {
-	return i.DirMediaType, i.DirMediaType != ""
-}
-
-var _ interface {
-	blob.MediaTypeAware
-	blob.SizeAware
-	blob.DigestAware
-} = (*InputDirBlob)(nil)
-
+// GetV1DirBlob creates a ReadOnlyBlob from a v1.Dir specification.
+// It reads the directory from the filesystem and applies compression if requested.
+// The function returns an error if the file path is empty or if there are issues reading the directory
+// contents from the filesystem.
+//
+// The function performs the following steps:
+//  1. Validates that the directory path is not empty
+//  2. Reads the directory contents using an instance of the virtual FileSystem
+//  3. Packs the directory contents into a tar archive
+//  4. Applies different configuration options of the v1.Dir specification
 func GetV1DirBlob(dir v1.Dir) (blob.ReadOnlyBlob, error) {
 	if dir.Path == "" {
 		return nil, fmt.Errorf("dir path must not be empty")
 	}
 
 	// TODO:
-	// - Handle FollowSymlinks, ExcludeFiles and IncludeFiles options.
+	// - Handle FollowSymlinks option.
 
+	// Pack directory contents as a tar archive.
 	reader, err := packDirToTar(dir.Path, &dir)
 	if err != nil {
-		return nil, fmt.Errorf("error producing tar archive: %w", err)
+		return nil, fmt.Errorf("error producing blob for a dir input: %w", err)
 	}
 
+	// Wrap the tar archive in a ReadOnlyBlob.
 	var dirBlob blob.ReadOnlyBlob = inmemory.New(reader, inmemory.WithMediaType(dir.MediaType))
 
+	// gzip the blob, if requested in the spec.
 	if dir.Compress {
 		dirBlob = compression.Compress(dirBlob)
 	}
@@ -52,10 +50,14 @@ func GetV1DirBlob(dir v1.Dir) (blob.ReadOnlyBlob, error) {
 	return dirBlob, nil
 }
 
+// packDirToTar is the main function, which creates a tar archive from the contents of the specified directory.
+// It creates an instance of the virtual FileSystem based on the directory path, creates a tar writer and
+// triggers recursive packaging of the directory contents.
 func packDirToTar(path string, dir *v1.Dir) (_ io.Reader, err error) {
 	// Determine the base directory for relative paths in the tar archive.
 	baseDir := path
 	if dir.PreserveDir {
+		// PreserveDir defines that the directory specified in the path field should be included in the blob.
 		baseDir = filepath.Dir(path)
 	}
 
@@ -65,7 +67,7 @@ func packDirToTar(path string, dir *v1.Dir) (_ io.Reader, err error) {
 		return nil, fmt.Errorf("failed to create filesystem while trying to access %v: %w", path, err)
 	}
 
-	// Create a new tar writer
+	// Create a new tar writer.
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	defer func() {
@@ -76,9 +78,9 @@ func packDirToTar(path string, dir *v1.Dir) (_ io.Reader, err error) {
 	}()
 
 	// Walk recursively through directory contents and add it to the tar.
-	err = walkDirContents(path, baseDir, fs, tw)
+	err = walkDirContents(path, baseDir, dir.ExcludeFiles, dir.IncludeFiles, fs, tw)
 	if err != nil {
-		return nil, fmt.Errorf("failed to add directory contents to tar: %w", err)
+		return nil, fmt.Errorf("failed to package directory contents as a tar archive: %w", err)
 	}
 
 	// Close the tar writer
@@ -89,15 +91,22 @@ func packDirToTar(path string, dir *v1.Dir) (_ io.Reader, err error) {
 	return bytes.NewReader(buf.Bytes()), nil
 }
 
-func walkDirContents(currentDir string, baseDir string, fs filesystem.FileSystem, tw *tar.Writer) (err error) {
+// walkDirContents does recursive packaging of the directory contents.
+// The function goes the directory contents file by file, checks if it should be included or excluded,
+// creates tar headers for each file and subfolder, and writes the file contents to the tar archive.
+// For subdirectories it calls itself recursively to process the subfolder contents.
+func walkDirContents(currentDir string, baseDir string,
+	excludePatterns, includePatterns []string,
+	fs filesystem.FileSystem, tw *tar.Writer,
+) (err error) {
 	// Read directory contents.
 	dirRelPath, err := filepath.Rel(baseDir, currentDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get directory relative path: %w", err)
 	}
 	dirEntries, err := fs.ReadDir(dirRelPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read directory entries: %w", err)
 	}
 
 	// Iterate over directory entries.
@@ -105,33 +114,42 @@ func walkDirContents(currentDir string, baseDir string, fs filesystem.FileSystem
 		// Get FileInfo for the entry.
 		info, err := entry.Info()
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to get file information: %w", err)
+		}
+
+		// Construct the full path of the entry.
+		entryPath := filepath.Join(currentDir, entry.Name())
+		// Get the relative path of the entry with respect to the base directory.
+		relPath, err := filepath.Rel(baseDir, entryPath)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path: %w", err)
+		}
+		// Check, if the entry should be included in the tar archive.
+		include, err := isPathIncluded(relPath, excludePatterns, includePatterns)
+		if err != nil {
+			return fmt.Errorf("failed to check if an entry should be included in the tar archive: %w", err)
+		}
+		if !include {
+			continue
 		}
 
 		// Create tar header.
 		header, err := tar.FileInfoHeader(info, "")
 		if err != nil {
-			return err
-		}
-
-		// Set the name in the tar archive (relative to the folder being archived).
-		entryPath := filepath.Join(currentDir, entry.Name())
-		relPath, err := filepath.Rel(baseDir, entryPath)
-		if err != nil {
-			return err
+			return fmt.Errorf("failed to create tar header: %w", err)
 		}
 		header.Name = relPath
 
 		// Write the header to the tar archive.
 		if err := tw.WriteHeader(header); err != nil {
-			return err
+			return fmt.Errorf("failed to write tar header to tar archive: %w", err)
 		}
 
 		// If the entry is a file, copy its content to the tar archive.
 		if entry.Type().IsRegular() {
 			file, err := fs.OpenFile(relPath, os.O_RDONLY, 0o644)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to open file: %w", err)
 			}
 			defer func() {
 				closeErr := file.Close()
@@ -141,17 +159,52 @@ func walkDirContents(currentDir string, baseDir string, fs filesystem.FileSystem
 			}()
 
 			if _, err := io.Copy(tw, file); err != nil {
-				return err
+				return fmt.Errorf("failed to write file contents to tar archive: %w", err)
 			}
 		}
 
-		// If the entry is a directory, recursively process its subfolders.
+		// If the entry is a directory, recursively process its contents.
 		if entry.IsDir() {
-			if err := walkDirContents(entryPath, baseDir, fs, tw); err != nil {
+			if err := walkDirContents(entryPath, baseDir, excludePatterns, includePatterns, fs, tw); err != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// isPathIncluded determines whether a file system entry should be included into blob.
+// Note that it relies on standard Go "path/filepath.Match()" method, which is rather limited,
+// when it comes to pattern matching.
+func isPathIncluded(path string, excludePatterns, includePatterns []string) (bool, error) {
+	// First check, if one of exclude regex matches.
+	for _, ex := range excludePatterns {
+		match, err := filepath.Match(ex, path)
+		if err != nil {
+			return false, fmt.Errorf("failed to match path to exclude pattern %w", err)
+		}
+		if match {
+			return false, nil
+		}
+	}
+
+	// If no explicit includes are defined, include everything.
+	if len(includePatterns) == 0 {
+		return true, nil
+	}
+
+	// Otherwise check if the include regex match.
+	for _, in := range includePatterns {
+		match, err := filepath.Match(in, path)
+		if err != nil {
+			return false, fmt.Errorf("failed to match path to include pattern %w", err)
+		}
+		if match {
+			return true, nil
+		}
+	}
+
+	// Finally return false if no include pattern matched.
+	return false, nil
 }

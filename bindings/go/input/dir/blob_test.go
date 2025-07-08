@@ -21,8 +21,9 @@ import (
 
 func TestGetV1DirBlob_Success(t *testing.T) {
 	type TestFile struct {
-		relPath string
-		content string
+		relPath       string
+		content       string
+		expectedInTar bool
 	}
 	tests := []struct {
 		name           string
@@ -47,9 +48,9 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 			expectGzip:     false,
 			testDirBase:    "input-dir",
 			testFiles: []TestFile{
-				{relPath: "blueprint.yaml", content: "blueprint"},
-				{relPath: "sub/deploy-execution.yaml", content: "deploy-execution"},
-				{relPath: "sub/sub2/export-execution.yaml", content: "export-execution"},
+				{relPath: "blueprint.yaml", content: "blueprint", expectedInTar: true},
+				{relPath: "sub/deploy-execution.yaml", content: "deploy-execution", expectedInTar: true},
+				{relPath: "sub/sub2/export-execution.yaml", content: "export-execution", expectedInTar: true},
 			},
 		},
 		{
@@ -63,11 +64,11 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 			expectGzip:     true,
 			testDirBase:    "input-dir",
 			testFiles: []TestFile{
-				{relPath: "blueprint.yaml", content: "blueprint"},
+				{relPath: "blueprint.yaml", content: "blueprint", expectedInTar: true},
 			},
 		},
 		{
-			name:           "root folder included",
+			name:           "preserve root folder",
 			mediaType:      "application/vnd.gardener.landscaper.blueprint.v1+tar",
 			compress:       false,
 			preserveDir:    true,
@@ -77,7 +78,59 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 			expectGzip:     false,
 			testDirBase:    "input-dir",
 			testFiles: []TestFile{
-				{relPath: "sub/sub2/export-execution.yaml", content: "export-execution"},
+				{relPath: "sub/sub2/export-execution.yaml", content: "export-execution", expectedInTar: true},
+			},
+		},
+		{
+			name:           "exclusion of files",
+			mediaType:      "application/vnd.gardener.landscaper.blueprint.v1+tar",
+			compress:       false,
+			preserveDir:    false,
+			followSymlinks: false,
+			excludeFiles:   []string{"sub/*.txt", "sub/sub2/?ile.yaml", "sub3/*"},
+			includeFiles:   []string{},
+			expectGzip:     false,
+			testDirBase:    "input-dir",
+			testFiles: []TestFile{
+				{relPath: "blueprint.yaml", content: "", expectedInTar: true},
+				{relPath: "sub/text.txt", content: "", expectedInTar: false}, // Excluded by "sub/*.txt".
+				{relPath: "sub/yaml.yaml", content: "", expectedInTar: true},
+				{relPath: "sub/sub2/file.yaml", content: "", expectedInTar: false}, // Excluded by "sub/sub2/?ile.yaml".
+				{relPath: "sub/sub2/file.txt", content: "", expectedInTar: true},
+				{relPath: "sub3/file.txt", content: "", expectedInTar: false},  // Excluded by "sub3/*".
+				{relPath: "sub3/file.yaml", content: "", expectedInTar: false}, // Excluded by "sub3/*".
+			},
+		},
+		{
+			name:           "inclusion of files",
+			mediaType:      "application/vnd.gardener.landscaper.blueprint.v1+tar",
+			compress:       false,
+			preserveDir:    false,
+			followSymlinks: false,
+			excludeFiles:   []string{},
+			includeFiles:   []string{"sub", "sub/*.txt"}, // "sub" to walk into the folder and "sub/*.txt" to filter out all .txt files there.
+			expectGzip:     false,
+			testDirBase:    "input-dir",
+			testFiles: []TestFile{
+				{relPath: "blueprint.yaml", content: "", expectedInTar: false}, // Not included because path does not match to defined explicit include patterns.
+				{relPath: "sub/text.txt", content: "", expectedInTar: true},    // Included by "sub/*.txt".
+				{relPath: "sub/yaml.yaml", content: "", expectedInTar: false},  // Not included because path does not match to defined explicit include patterns.
+			},
+		},
+		{
+			name:           "precedence of exclusion over inclusion",
+			mediaType:      "application/vnd.gardener.landscaper.blueprint.v1+tar",
+			compress:       false,
+			preserveDir:    false,
+			followSymlinks: false,
+			excludeFiles:   []string{"sub/*"},
+			includeFiles:   []string{"blueprint.yaml", "sub", "sub/*.txt"},
+			expectGzip:     false,
+			testDirBase:    "input-dir",
+			testFiles: []TestFile{
+				{relPath: "blueprint.yaml", content: "", expectedInTar: true}, // Included by "blueprint.yaml".
+				{relPath: "sub/text.txt", content: "", expectedInTar: false},  // Excluded by "sub/*", despite inclusion by "sub/*.txt".
+				{relPath: "sub/yaml.yaml", content: "", expectedInTar: false}, // Excluded by "sub/*".
 			},
 		},
 	}
@@ -164,8 +217,14 @@ func TestGetV1DirBlob_Success(t *testing.T) {
 				}
 
 				untarredData, err := extractFileFromTar(data, fileName)
-				require.NoError(t, err)
-				assert.Equal(t, tf.content, string(untarredData))
+				if tf.expectedInTar {
+					// If the file should have been included in the tar, check if it is there.
+					require.NoError(t, err)
+					assert.Equal(t, tf.content, string(untarredData))
+				} else {
+					// If the file should NOT have been included, an error is expected when trying to extract it.
+					assert.Error(t, err)
+				}
 			}
 		})
 	}
@@ -198,7 +257,7 @@ func TestGetV1DirBlob_NonExistentPath(t *testing.T) {
 	assert.Nil(t, dirBlob)
 
 	// Another case: the input directory does not exist, but its parent folder does.
-	// In this case, and if PreserveDir is true, the FileSystem is created for the existing parent folder.
+	// In this case, and if PreserveDir is true, the FileSystem instance is created for the existing parent folder.
 	// Still, as there is nothing to tar, we expect an error.
 	tempDir := t.TempDir()
 	dirSpec = v1.Dir{
@@ -216,36 +275,36 @@ func TestGetV1DirBlob_NonExistentPath(t *testing.T) {
 
 // extractFileFromTar extracts a specific file from a tar archive and returns its content
 func extractFileFromTar(tarData []byte, fileName string) ([]byte, error) {
-	// Create a reader from the byte data
+	// Create a reader from the byte data.
 	reader := bytes.NewReader(tarData)
 
-	// Create a tar reader
+	// Create a tar reader.
 	tr := tar.NewReader(reader)
 
-	// Normalize the file name for comparison
+	// Normalize the file name for comparison.
 	normalizedFileName := filepath.Clean(fileName)
 
-	// Iterate through the files in the tar archive
+	// Iterate through the files in the tar archive.
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
-			break // End of archive
+			break // End of archive.
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error reading tar header: %w", err)
 		}
 
-		// Normalize the header name for comparison
+		// Normalize the header name for comparison.
 		normalizedHeaderName := filepath.Clean(header.Name)
 
-		// Check if this is the file we're looking for
+		// Check if this is the file we're looking for.
 		if normalizedHeaderName == normalizedFileName {
-			// Make sure it's a regular file
+			// Make sure it's a regular file.
 			if header.Typeflag != tar.TypeReg {
 				return nil, fmt.Errorf("'%s' is not a regular file (type: %c)", fileName, header.Typeflag)
 			}
 
-			// Read the file content
+			// Read the file content.
 			content, err := io.ReadAll(tr)
 			if err != nil {
 				return nil, fmt.Errorf("error reading file content: %w", err)
@@ -255,6 +314,6 @@ func extractFileFromTar(tarData []byte, fileName string) ([]byte, error) {
 		}
 	}
 
-	// File not found
+	// File not found.
 	return nil, fmt.Errorf("file '%s' not found in tar archive", fileName)
 }
