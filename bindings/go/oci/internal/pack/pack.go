@@ -48,15 +48,15 @@ type Options struct {
 }
 
 // ArtifactBlob packs a [ociblob.ArtifactBlob] into an OCI Storage
-func ArtifactBlob(ctx context.Context, storage content.Storage, b *ociblob.ArtifactBlob, opts Options) (desc ociImageSpecV1.Descriptor, err error) {
+func ArtifactBlob(ctx context.Context, storage content.Storage, b *ociblob.ArtifactBlob, opts Options) (_ *ociblob.ArtifactBlob, desc ociImageSpecV1.Descriptor, err error) {
 	localBlob, ok := b.GetAccess().(*v2.LocalBlob)
 	if !ok {
-		return ociImageSpecV1.Descriptor{}, fmt.Errorf("artifact access is not a local blob access: %T", b.GetAccess())
+		return nil, ociImageSpecV1.Descriptor{}, fmt.Errorf("artifact access is not a local blob access: %T", b.GetAccess())
 	}
 	return ResourceLocalBlob(ctx, storage, b, localBlob, opts)
 }
 
-func ResourceLocalBlob(ctx context.Context, storage content.Storage, b *ociblob.ArtifactBlob, access *v2.LocalBlob, opts Options) (desc ociImageSpecV1.Descriptor, err error) {
+func ResourceLocalBlob(ctx context.Context, storage content.Storage, b *ociblob.ArtifactBlob, access *v2.LocalBlob, opts Options) (_ *ociblob.ArtifactBlob, desc ociImageSpecV1.Descriptor, err error) {
 	switch mediaType := access.MediaType; mediaType {
 	case layout.MediaTypeOCIImageLayoutTarV1, layout.MediaTypeOCIImageLayoutTarGzipV1:
 		return ResourceLocalBlobOCILayout(ctx, storage, b, opts)
@@ -65,17 +65,17 @@ func ResourceLocalBlob(ctx context.Context, storage content.Storage, b *ociblob.
 	}
 }
 
-func ResourceLocalBlobOCILayer(ctx context.Context, storage content.Storage, b *ociblob.ArtifactBlob, access *v2.LocalBlob, opts Options) (ociImageSpecV1.Descriptor, error) {
+func ResourceLocalBlobOCILayer(ctx context.Context, storage content.Storage, b *ociblob.ArtifactBlob, access *v2.LocalBlob, opts Options) (*ociblob.ArtifactBlob, ociImageSpecV1.Descriptor, error) {
 	b, layer, err := PrepareArtifactBlobForOCI(b, ResourceBlobOCILayerOptions{
 		BlobMediaType: access.MediaType,
 		BlobDigest:    digest.Digest(access.LocalReference),
 	})
 	if err != nil {
-		return ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to create resource layer based on blob: %w", err)
+		return nil, ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to create resource layer based on blob: %w", err)
 	}
 
 	if err := Blob(ctx, storage, b, layer); err != nil {
-		return ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to push blob: %w", err)
+		return nil, ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to push blob: %w", err)
 	}
 
 	annotations := maps.Clone(layer.Annotations)
@@ -84,13 +84,13 @@ func ResourceLocalBlobOCILayer(ctx context.Context, storage content.Storage, b *
 	global := backedByGlobalStore(storage) || opts.EnforceGlobalAccess
 
 	if err := updateArtifactAccess(b.Artifact, layer, updateAccessOptions{opts, global}); err != nil {
-		return ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to update resource access: %w", err)
+		return nil, ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to update resource access: %w", err)
 	}
 
-	return layer, nil
+	return b, layer, nil
 }
 
-func ResourceLocalBlobOCILayout(ctx context.Context, storage content.Storage, b *ociblob.ArtifactBlob, opts Options) (ociImageSpecV1.Descriptor, error) {
+func ResourceLocalBlobOCILayout(ctx context.Context, storage content.Storage, b *ociblob.ArtifactBlob, opts Options) (*ociblob.ArtifactBlob, ociImageSpecV1.Descriptor, error) {
 	index, err := tar.CopyOCILayoutWithIndex(ctx, storage, b, tar.CopyOCILayoutWithIndexOptions{
 		CopyGraphOptions: opts.CopyGraphOptions,
 		MutateParentFunc: func(idx *ociImageSpecV1.Descriptor) error {
@@ -98,13 +98,13 @@ func ResourceLocalBlobOCILayout(ctx context.Context, storage content.Storage, b 
 		},
 	})
 	if err != nil {
-		return ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to copy OCI layout: %w", err)
+		return nil, ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to copy OCI layout: %w", err)
 	}
 	global := backedByGlobalStore(storage)
 	if err := updateArtifactAccess(b.Artifact, index, updateAccessOptions{opts, global}); err != nil {
-		return ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to update resource access: %w", err)
+		return nil, ociImageSpecV1.Descriptor{}, fmt.Errorf("failed to update resource access: %w", err)
 	}
-	return index, nil
+	return b, index, nil
 }
 
 // ResourceBlobOCILayerOptions defines the configuration options for pushing a blob as a resource.

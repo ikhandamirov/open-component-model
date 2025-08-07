@@ -190,8 +190,18 @@ func (r *ArtifactBlob) Buffer() (result *ArtifactBlob, err error) {
 		return nil, fmt.Errorf("failed to create in-memory eagerly cached blob from ReadOnlyBlob: %w", err)
 	}
 
-	// Reuse existing Artifact, but replace the ReadOnlyBlob with the in-memory buffered one.
-	return NewArtifactBlob(r.Artifact, inMemoryBlob)
+	// Create a new instance of the descriptor.
+	var newArtifact descriptor.Artifact
+	switch a := r.Artifact.(type) {
+	case *descriptor.Resource:
+		newArtifact = a.DeepCopy()
+	case *descriptor.Source:
+		newArtifact = a.DeepCopy()
+	default:
+		return nil, fmt.Errorf("artifact is neither *descriptor.Resource not *descriptor.Source: %T", r.Artifact)
+	}
+
+	return NewArtifactBlob(newArtifact, inMemoryBlob)
 }
 
 // Interface implementations

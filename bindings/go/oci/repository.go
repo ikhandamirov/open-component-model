@@ -200,8 +200,13 @@ func (repo *Repository) AddLocalResource(
 
 	resource = resource.DeepCopy()
 
-	if err := repo.uploadAndUpdateLocalArtifact(ctx, component, version, resource, b); err != nil {
+	var artifact descriptor.Artifact
+	if artifact, err = repo.uploadAndUpdateLocalArtifact(ctx, component, version, resource, b); err != nil {
 		return nil, err
+	}
+	resource, ok := artifact.(*descriptor.Resource)
+	if !ok {
+		return nil, fmt.Errorf("expected artifact to be *descriptor.Resource, but got %T", artifact)
 	}
 
 	return resource, nil
@@ -219,8 +224,13 @@ func (repo *Repository) AddLocalSource(ctx context.Context, component, version s
 
 	source = source.DeepCopy()
 
-	if err := repo.uploadAndUpdateLocalArtifact(ctx, component, version, source, content); err != nil {
+	var artifact descriptor.Artifact
+	if artifact, err = repo.uploadAndUpdateLocalArtifact(ctx, component, version, source, content); err != nil {
 		return nil, err
+	}
+	source, ok := artifact.(*descriptor.Source)
+	if !ok {
+		return nil, fmt.Errorf("expected artifact to be *descriptor.Resource, but got %T", artifact)
 	}
 
 	return source, nil
@@ -303,28 +313,28 @@ func (repo *Repository) processOCIImageDigest(ctx context.Context, res *descript
 	return res, nil
 }
 
-func (repo *Repository) uploadAndUpdateLocalArtifact(ctx context.Context, component string, version string, artifact descriptor.Artifact, b blob.ReadOnlyBlob) error {
+func (repo *Repository) uploadAndUpdateLocalArtifact(ctx context.Context, component string, version string, artifact descriptor.Artifact, b blob.ReadOnlyBlob) (descriptor.Artifact, error) {
 	reference, store, err := repo.getStore(ctx, component, version)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := ociblob.UpdateArtifactWithInformationFromBlob(artifact, b); err != nil {
-		return fmt.Errorf("failed to update artifact with data from blob: %w", err)
+		return nil, fmt.Errorf("failed to update artifact with data from blob: %w", err)
 	}
 
 	artifactBlob, err := ociblob.NewArtifactBlob(artifact, b)
 	if err != nil {
-		return fmt.Errorf("failed to create resource blob: %w", err)
+		return nil, fmt.Errorf("failed to create resource blob: %w", err)
 	}
 
-	desc, err := pack.ArtifactBlob(ctx, store, artifactBlob, pack.Options{
+	artifactBlob, desc, err := pack.ArtifactBlob(ctx, store, artifactBlob, pack.Options{
 		AccessScheme:     repo.scheme,
 		CopyGraphOptions: repo.resourceCopyOptions.CopyGraphOptions,
 		BaseReference:    reference,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to pack resource blob: %w", err)
+		return nil, fmt.Errorf("failed to pack resource blob: %w", err)
 	}
 
 	if introspection.IsOCICompliantManifest(desc) {
@@ -333,7 +343,7 @@ func (repo *Repository) uploadAndUpdateLocalArtifact(ctx context.Context, compon
 		repo.localArtifactLayerCache.Add(reference, desc)
 	}
 
-	return nil
+	return artifactBlob.Artifact, nil
 }
 
 // GetLocalResource retrieves a local resource from the repository.
